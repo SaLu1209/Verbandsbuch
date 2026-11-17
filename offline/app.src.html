@@ -31,7 +31,9 @@
     <button class="linkbtn" id="logout">Sperren</button>
   </nav>
 </header>
-<main id="app"></main>
+<main id="app"><section class="card narrow center"><h1>Verbandsbuch</h1>
+<p>Die Anwendung startet nicht. Vermutlich wird die Datei in einer Vorschau angezeigt, die keine Programme ausführt.</p>
+<p class="muted">Bitte die Datei herunterladen bzw. speichern und mit einem Browser öffnen (Chrome, Edge, Firefox oder Safari).</p></section></main>
 <footer class="footer noprint" id="footer"><a href="#/admin">Verwaltung</a></footer>
 
 <script>/*QRCODE*/</script>
@@ -103,7 +105,12 @@ const app = $('#app');
 let flashMsg = '';
 function flash(msg) { flashMsg = msg; }
 function takeFlash(kind = '') { const m = flashMsg; flashMsg = ''; return m ? `<div class="flash ${kind}" role="status">${esc(m)}</div>` : ''; }
-function go(hash) { if (location.hash === hash) render(); else location.hash = hash; }
+let route = location.hash || '#/';
+function go(hash) {
+  route = hash;
+  try { if (location.hash !== hash) history.replaceState(null, '', hash); } catch (e) { /* z. B. in Vorschau-Fenstern nicht erlaubt */ }
+  render();
+}
 function download(name, content, type) {
   const blob = new Blob([content], { type });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
@@ -505,7 +512,7 @@ function render() {
   $('#orgname').textContent = db.org;
   document.title = 'Verbandsbuch' + (db.org ? ' – ' + db.org : '');
   app.className = '';
-  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  const parts = route.replace(/^#\/?/, '').split('/').filter(Boolean);
   const admin = parts[0] === 'admin';
   const loggedIn = admin && isAdmin();
   $('#adminnav').hidden = !loggedIn;
@@ -530,7 +537,28 @@ function render() {
   }
 }
 $('#logout').onclick = () => { setAdmin(false); go('#/'); };
-window.addEventListener('hashchange', render);
+window.addEventListener('hashchange', () => { if (location.hash && location.hash !== route) { route = location.hash; render(); } });
+// Formulare selbst auslösen (Knopf oder Enter). Manche Vorschau-Fenster sperren das normale Absenden.
+function fireSubmit(form, e) {
+  if (!form || typeof form.onsubmit !== 'function') return;
+  e.preventDefault();
+  form.onsubmit({ preventDefault() {}, target: form });
+}
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest && e.target.closest('button');
+  if (btn && btn.form && btn.type === 'submit') fireSubmit(btn.form, e);
+});
+document.addEventListener('keydown', (e) => {
+  const el = e.target;
+  if (e.key === 'Enter' && el.tagName === 'INPUT' && !['checkbox', 'file', 'button', 'submit'].includes(el.type)) fireSubmit(el.form, e);
+});
+// Alle internen Links (#/...) selbst behandeln, damit nichts aus der Seite herausspringt
+document.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('a[href^="#/"]');
+  if (!a || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  e.preventDefault();
+  go(a.getAttribute('href'));
+});
 window.addEventListener('storage', (e) => { if (e.key === KEY) render(); });
 render();
 </script>
