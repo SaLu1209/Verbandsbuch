@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test"
+    "test": "node --disable-warning=ExperimentalWarning --test",
+    "build:offline": "node offline/build.js"
   },
   "repository": {
     "type": "git",

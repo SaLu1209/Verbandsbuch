@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Verbandsbuch</title>
+<style>
+/*STYLE*/
+.footer { text-align: center; padding: 1rem; font-size: .85rem; color: var(--muted); }
+.footer a { color: var(--muted); }
+.offline-badge { display: inline-block; font-size: .75rem; background: rgba(255,255,255,.18); padding: .1rem .5rem; border-radius: 99px; margin-left: .5rem; font-weight: 500; }
+.pinput { font-size: 1.6rem; letter-spacing: .3em; text-align: center; }
+.note { background: #fffaeb; border: 1px solid #fedf89; color: #93370d; padding: .75rem 1rem; border-radius: 8px; margin: 1rem 0; text-align: left; }
+.stack > * + * { margin-top: .75rem; }
+.filebtn input { display: none; }
+@media print {
+  .topbar, .footer, .noprint, .filters, .actions { display: none !important; }
+  main { max-width: none; padding: 0; }
+  .card { border: 0; padding: 0; }
+}
+</style>
+</head>
+<body>
+<header class="topbar noprint">
+  <a class="brand" href="#/"><svg class="cross" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="4" fill="currentColor"/><path d="M10 6h4v4h4v4h-4v4h-4v-4H6v-4h4z" fill="#fff"/></svg><span>Verbandsbuch <small id="orgname"></small></span><span class="offline-badge">offline</span></a>
+  <nav class="adminnav" id="adminnav" hidden>
+    <a href="#/admin">Einträge</a>
+    <a href="#/admin/standorte">Standorte</a>
+    <a href="#/admin/einstellungen">Einstellungen &amp; Sicherung</a>
+    <button class="linkbtn" id="logout">Sperren</button>
+  </nav>
+</header>
+<main id="app"></main>
+<footer class="footer noprint" id="footer"><a href="#/admin">Verwaltung</a></footer>
+
+<script>/*QRCODE*/</script>
+<script>
+'use strict';
+// ================= Datenhaltung (lokal im Browser) =================
+const KEY = 'verbandsbuch.v1';
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+let memoryStore = null; // Fallback, falls der Browser keinen Speicher erlaubt
+let storageOk = true;
+
+function emptyData() { return { version: 1, org: '', pinHash: '', nextId: 1, nextLoc: 1, locations: [], entries: [] }; }
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    return raw ? Object.assign(emptyData(), JSON.parse(raw)) : emptyData();
+  } catch (e) { storageOk = false; return memoryStore || emptyData(); }
+}
+function save(data) {
+  try { localStorage.setItem(KEY, JSON.stringify(data)); }
+  catch (e) { storageOk = false; memoryStore = data; }
+}
+let db = load();
+function commit(fn) { db = load(); fn(db); save(db); }
+
+function genCode(len = 8) {
+  const b = new Uint8Array(len); crypto.getRandomValues(b);
+  return Array.from(b, (x) => CODE_ALPHABET[x % CODE_ALPHABET.length]).join('');
+}
+const normCode = (c) => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+async function hashPin(pin) {
+  const text = 'verbandsbuch:' + pin;
+  if (window.crypto && crypto.subtle) {
+    try {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+      return 'sha256:' + Array.from(new Uint8Array(buf), (x) => x.toString(16).padStart(2, '0')).join('');
+    } catch (e) { /* weiter mit Fallback */ }
+  }
+  let h = 2166136261; // FNV-1a als Rückfall (z. B. ältere Browser)
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return 'fnv:' + (h >>> 0).toString(16);
+}
+
+// Anmeldung gilt für die Browser-Sitzung, max. 30 Minuten ohne Aktivität
+const SESSION_KEY = 'verbandsbuch.admin';
+function isAdmin() {
+  try {
+    const t = Number(sessionStorage.getItem(SESSION_KEY));
+    if (t && Date.now() - t < 30 * 60 * 1000) { sessionStorage.setItem(SESSION_KEY, String(Date.now())); return true; }
+  } catch (e) { return window.__admin === true; }
+  return false;
+}
+function setAdmin(on) {
+  window.__admin = on;
+  try { on ? sessionStorage.setItem(SESSION_KEY, String(Date.now())) : sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+}
+
+// ================= Hilfsfunktionen =================
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function fmt(iso) {
+  if (!iso) return '';
+  const [d, t] = String(iso).split('T'); const [y, m, day] = d.split('-');
+  return `${day}.${m}.${y}${t ? ', ' + t.slice(0, 5) + ' Uhr' : ''}`;
+}
+function nowLocal() { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); }
+const $ = (sel) => document.querySelector(sel);
+const app = $('#app');
+let flashMsg = '';
+function flash(msg) { flashMsg = msg; }
+function takeFlash(kind = '') { const m = flashMsg; flashMsg = ''; return m ? `<div class="flash ${kind}" role="status">${esc(m)}</div>` : ''; }
+function go(hash) { if (location.hash === hash) render(); else location.hash = hash; }
+function download(name, content, type) {
+  const blob = new Blob([content], { type });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const appUrl = () => location.href.split('#')[0];
+const isHosted = () => /^https?:$/.test(location.protocol);
+
+// ================= Öffentliche Seiten =================
+function viewCode(error) {
+  const noLoc = !db.locations.some((l) => l.active);
+  app.innerHTML = `
+  <section class="card narrow center">
+    <h1>Erste-Hilfe-Leistung dokumentieren</h1>
+    <p class="muted">Geben Sie den Zugangscode ein, der am Verbandkasten aushängt.</p>
+    ${error ? `<div class="flash error">${esc(error)}</div>` : ''}
+    ${noLoc ? `<div class="note">Es ist noch kein Standort eingerichtet. Bitte zuerst in der <a href="#/admin">Verwaltung</a> einen Standort anlegen.</div>` : ''}
+    <form id="codeform" class="codeform" autocomplete="off">
+      <label for="code">Zugangscode</label>
+      <input id="code" class="codeinput" maxlength="12" autocapitalize="characters" spellcheck="false" placeholder="z. B. K7M2Q9XA" required autofocus>
+      <button class="btn primary">Formular öffnen</button>
+    </form>
+  </section>`;
+  $('#codeform').onsubmit = (e) => {
+    e.preventDefault();
+    const loc = findLoc($('#code').value);
+    if (!loc) return viewCode('Unbekannter oder deaktivierter Code.');
+    go('#/e/' + loc.code);
+  };
+}
+const findLoc = (code) => db.locations.find((l) => l.active && l.code === normCode(code));
+
+function field(name, label, { type = 'text', required = true, value = '', hint = '', rows, max = 200, attrs = '' } = {}) {
+  const star = required ? ' <span class="req">*</span>' : ' <span class="opt">(optional)</span>';
+  const input = rows
+    ? `<textarea id="${name}" name="${name}" rows="${rows}" maxlength="${max}"${required ? ' required' : ''}>${esc(value)}</textarea>`
+    : `<input id="${name}" name="${name}" type="${type}" value="${esc(value)}" maxlength="${max}"${required ? ' required' : ''} ${attrs}>`;
+  return `<div class="field"><label for="${name}">${label}${star}</label>${hint ? `<p class="hint">${hint}</p>` : ''}${input}</div>`;
+}
+
+function viewForm(loc, values = {}, errors = []) {
+  const v = (k) => values[k] ?? ''; const now = nowLocal();
+  app.innerHTML = `
+  <section class="card">
+    <p class="eyebrow">Standort: <strong>${esc(loc.name)}</strong></p>
+    <h1>Eintrag ins Verbandsbuch</h1>
+    <p class="muted">Dokumentation von Erste-Hilfe-Leistungen nach § 24 Abs. 6 DGUV Vorschrift 1.
+    Nach dem Speichern sind die Angaben nur in der geschützten Verwaltung einsehbar.</p>
+    ${errors.length ? `<div class="flash error" role="alert"><strong>Bitte prüfen:</strong><ul>${errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div>` : ''}
+    <form id="entryform" class="entryform" novalidate>
+      <fieldset><legend><span class="num">1</span> Verletzte Person</legend>
+        <div class="grid2">
+          ${field('injured_name', 'Name, Vorname', { value: v('injured_name'), max: 120 })}
+          ${field('injured_department', 'Abteilung / Bereich', { required: false, value: v('injured_department'), max: 120 })}
+        </div></fieldset>
+      <fieldset><legend><span class="num">2</span> Unfall bzw. Erkrankung</legend>
+        <div class="grid2">
+          ${field('incident_at', 'Datum und Uhrzeit', { type: 'datetime-local', value: v('incident_at') || now, max: 16 })}
+          ${field('incident_place', 'Ort (Unternehmensteil)', { value: v('incident_place') || loc.name, max: 160 })}
+        </div>
+        ${field('incident_course', 'Hergang', { rows: 3, value: v('incident_course'), hint: 'Was ist passiert? Kurz und sachlich beschreiben.', max: 2000 })}
+        ${field('injury_type', 'Art und Umfang der Verletzung / Erkrankung', { rows: 2, value: v('injury_type'), hint: 'z. B. Schnittwunde am linken Zeigefinger, ca. 1 cm', max: 1000 })}
+        ${field('witnesses', 'Zeugen', { required: false, value: v('witnesses'), max: 300 })}
+      </fieldset>
+      <fieldset><legend><span class="num">3</span> Erste-Hilfe-Leistung</legend>
+        <div class="grid2">
+          ${field('aid_at', 'Datum und Uhrzeit', { type: 'datetime-local', value: v('aid_at') || now, max: 16 })}
+          ${field('aider_name', 'Name der/des Erste-Hilfe-Leistenden', { value: v('aider_name'), max: 120 })}
+        </div>
+        ${field('aid_measures', 'Art und Weise der Erste-Hilfe-Maßnahmen', { rows: 3, value: v('aid_measures'), hint: 'z. B. Wunde gereinigt, Pflaster angelegt, Kühlung', max: 2000 })}
+        <div class="checks">
+          <label class="check"><input type="checkbox" name="doctor_visit"${values.doctor_visit ? ' checked' : ''}> Arztbesuch / Weiterbehandlung erforderlich</label>
+          <label class="check"><input type="checkbox" name="work_stopped"${values.work_stopped ? ' checked' : ''}> Arbeit wurde unterbrochen bzw. beendet</label>
+        </div>
+      </fieldset>
+      <label class="check consent"><input type="checkbox" name="consent"${values.consent ? ' checked' : ''}>
+        Ich bestätige, dass die Angaben wahrheitsgemäß sind. Die Daten werden ausschließlich zur Dokumentation
+        gemäß DGUV Vorschrift 1 verarbeitet und mindestens 5 Jahre vertraulich aufbewahrt.</label>
+      <button class="btn primary big">Eintrag speichern</button>
+    </form>
+  </section>`;
+  if (errors.length) window.scrollTo(0, 0);
+  $('#entryform').onsubmit = (e) => {
+    e.preventDefault();
+    const f = e.target; const val = {};
+    ['injured_name', 'injured_department', 'incident_at', 'incident_place', 'incident_course', 'injury_type', 'witnesses', 'aid_at', 'aid_measures', 'aider_name']
+      .forEach((k) => { val[k] = f.elements[k].value.trim(); });
+    ['doctor_visit', 'work_stopped', 'consent'].forEach((k) => { val[k] = f.elements[k].checked; });
+    const DT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/; const errs = [];
+    if (!val.injured_name) errs.push('Name der verletzten Person fehlt.');
+    if (!DT.test(val.incident_at)) errs.push('Datum/Uhrzeit des Unfalls fehlt oder ist ungültig.');
+    if (!val.incident_place) errs.push('Ort des Unfalls fehlt.');
+    if (!val.incident_course) errs.push('Hergang fehlt.');
+    if (!val.injury_type) errs.push('Art und Umfang der Verletzung fehlen.');
+    if (!DT.test(val.aid_at)) errs.push('Datum/Uhrzeit der Erste-Hilfe-Leistung fehlt oder ist ungültig.');
+    if (!val.aid_measures) errs.push('Erste-Hilfe-Maßnahmen fehlen.');
+    if (!val.aider_name) errs.push('Name der/des Erste-Hilfe-Leistenden fehlt.');
+    if (DT.test(val.incident_at) && DT.test(val.aid_at) && val.aid_at < val.incident_at) errs.push('Die Erste Hilfe kann nicht vor dem Unfall geleistet worden sein.');
+    if (!val.consent) errs.push('Bitte bestätigen Sie die Angaben (Häkchen unten).');
+    if (errs.length) return viewForm(loc, val, errs);
+    let id;
+    commit((d) => {
+      id = d.nextId++;
+      const { consent, ...entry } = val;
+      d.entries.push({ ...entry, id, location_id: loc.id, location_name: loc.name, created_at: new Date().toISOString() });
+    });
+    go(`#/danke/${loc.code}/${id}`);
+  };
+}
+
+function viewThanks(code, id) {
+  app.innerHTML = `
+  <section class="card narrow center">
+    <div class="okmark">✓</div>
+    <h1>Vielen Dank!</h1>
+    <p>Der Eintrag wurde unter der Nummer <strong>#${esc(id)}</strong> gespeichert.</p>
+    ${storageOk ? '' : '<div class="note">Achtung: Dieser Browser erlaubt kein dauerhaftes Speichern. Der Eintrag geht beim Schließen verloren. Bitte die Verwaltung informieren.</div>'}
+    <p class="muted">Bei Arbeitsunfällen mit mehr als 3 Tagen Arbeitsunfähigkeit ist zusätzlich eine Unfallanzeige an die
+    Berufsgenossenschaft erforderlich. Bitte informieren Sie Ihre Führungskraft.</p>
+    <a class="btn" href="#/">Fertig</a>
+  </section>`;
+}
+
+// ================= Verwaltung =================
+function viewLogin(error) {
+  const first = !db.pinHash;
+  app.innerHTML = `
+  <section class="card narrow">
+    <h1>${first ? 'Verwaltung einrichten' : 'Verwaltung'}</h1>
+    <p class="muted">${first ? 'Legen Sie eine PIN fest (mind. 4 Zeichen). Sie schützt die Einträge auf diesem Gerät.' : 'Bitte PIN eingeben.'}</p>
+    ${error ? `<div class="flash error">${esc(error)}</div>` : ''}
+    <form id="loginform" class="stack">
+      <div class="field"><label for="pin">PIN</label><input id="pin" type="password" class="pinput" autocomplete="${first ? 'new-password' : 'current-password'}" required autofocus></div>
+      ${first ? '<div class="field"><label for="pin2">PIN wiederholen</label><input id="pin2" type="password" class="pinput" autocomplete="new-password" required></div>' : ''}
+      <button class="btn primary">${first ? 'PIN speichern' : 'Entsperren'}</button>
+    </form>
+  </section>`;
+  $('#loginform').onsubmit = async (e) => {
+    e.preventDefault();
+    const pin = $('#pin').value;
+    if (first) {
+      if (pin.length < 4) return viewLogin('Die PIN muss mindestens 4 Zeichen haben.');
+      if (pin !== $('#pin2').value) return viewLogin('Die PINs stimmen nicht überein.');
+      const h = await hashPin(pin); commit((d) => { d.pinHash = h; });
+      setAdmin(true); flash('PIN gespeichert. Legen Sie jetzt Ihren ersten Standort an.'); return go('#/admin/standorte');
+    }
+    if (await hashPin(pin) !== db.pinHash) return viewLogin('PIN falsch.');
+    setAdmin(true); render();
+  };
+}
+
+let filter = { q: '', loc: '', von: '', bis: '' };
+function filteredEntries() {
+  const q = filter.q.toLowerCase();
+  return db.entries.filter((e) =>
+    (!q || [e.injured_name, e.aider_name, e.injury_type, e.incident_course, e.incident_place].some((s) => String(s || '').toLowerCase().includes(q))) &&
+    (!filter.loc || String(e.location_id) === filter.loc) &&
+    (!filter.von || e.incident_at >= filter.von) &&
+    (!filter.bis || e.incident_at <= filter.bis + 'T23:59')
+  ).sort((a, b) => (b.incident_at.localeCompare(a.incident_at)) || b.id - a.id);
+}
+
+function viewEntries() {
+  const list = filteredEntries();
+  app.className = 'wide';
+  app.innerHTML = `
+  ${takeFlash()}
+  ${storageOk ? '' : '<div class="note">Dieser Browser erlaubt kein dauerhaftes Speichern (z. B. privater Modus). Daten gehen beim Schließen verloren.</div>'}
+  <div class="headrow">
+    <h1>Einträge <span class="count">${list.length}</span></h1>
+    <div class="actions">
+      <button class="btn" id="csv">CSV-Export</button>
+      <a class="btn" href="#/admin/druck">Drucken / PDF</a>
+    </div>
+  </div>
+  <form class="filters" id="filters">
+    <input name="q" type="search" placeholder="Suche (Name, Verletzung, Hergang …)" value="${esc(filter.q)}">
+    <select name="loc"><option value="">Alle Standorte</option>
+      ${db.locations.map((l) => `<option value="${l.id}"${String(l.id) === filter.loc ? ' selected' : ''}>${esc(l.name)}</option>`).join('')}</select>
+    <label>von <input name="von" type="date" value="${esc(filter.von)}"></label>
+    <label>bis <input name="bis" type="date" value="${esc(filter.bis)}"></label>
+    <button class="btn">Filtern</button>
+  </form>
+  ${list.length ? `<div class="tablewrap"><table class="entries">
+    <thead><tr><th>Nr.</th><th>Unfall</th><th>Verletzte Person</th><th>Verletzung</th><th>Ersthelfer/in</th><th>Standort</th><th>Hinweise</th></tr></thead>
+    <tbody>${list.map((e) => `<tr>
+      <td data-label="Nr."><a href="#/admin/eintrag/${e.id}">#${e.id}</a></td>
+      <td data-label="Unfall">${esc(fmt(e.incident_at))}</td>
+      <td data-label="Verletzte Person">${esc(e.injured_name)}</td>
+      <td data-label="Verletzung">${esc(e.injury_type)}</td>
+      <td data-label="Ersthelfer/in">${esc(e.aider_name)}</td>
+      <td data-label="Standort">${esc(e.location_name)}</td>
+      <td data-label="Hinweise">${e.doctor_visit ? '<span class="tag warn">Arzt</span>' : ''}${e.work_stopped ? '<span class="tag">Arbeit unterbr.</span>' : ''}</td>
+    </tr>`).join('')}</tbody></table></div>`
+    : `<div class="card center muted">${db.locations.length ? 'Keine Einträge gefunden.' : 'Noch keine Standorte angelegt. <a href="#/admin/standorte">Jetzt ersten Standort anlegen →</a>'}</div>`}`;
+  $('#filters').onsubmit = (e) => {
+    e.preventDefault(); const f = e.target.elements;
+    filter = { q: f.q.value.trim(), loc: f.loc.value, von: f.von.value, bis: f.bis.value }; render();
+  };
+  $('#csv').onclick = () => exportCsv(list);
+}
+
+function detailHtml(e) {
+  const row = (l, v) => `<div class="kv"><dt>${l}</dt><dd>${esc(v) || '<span class="muted">–</span>'}</dd></div>`;
+  return `<dl class="detail">
+    <h3>Verletzte Person</h3>${row('Name', e.injured_name)}${row('Abteilung / Bereich', e.injured_department)}
+    <h3>Unfall / Erkrankung</h3>${row('Datum, Uhrzeit', fmt(e.incident_at))}${row('Ort', e.incident_place)}${row('Hergang', e.incident_course)}${row('Art und Umfang der Verletzung', e.injury_type)}${row('Zeugen', e.witnesses)}
+    <h3>Erste-Hilfe-Leistung</h3>${row('Datum, Uhrzeit', fmt(e.aid_at))}${row('Maßnahmen', e.aid_measures)}${row('Erste-Hilfe-Leistende/r', e.aider_name)}${row('Arztbesuch erforderlich', e.doctor_visit ? 'Ja' : 'Nein')}${row('Arbeit unterbrochen', e.work_stopped ? 'Ja' : 'Nein')}
+    <h3>Erfassung</h3>${row('Standort (Verbandkasten)', e.location_name)}${row('Erfasst am', new Date(e.created_at).toLocaleString('de-DE'))}
+  </dl>`;
+}
+
+function viewEntry(id) {
+  const e = db.entries.find((x) => x.id === Number(id));
+  if (!e) return go('#/admin');
+  app.className = 'wide';
+  app.innerHTML = `
+  <p class="noprint"><a href="#/admin">← Alle Einträge</a></p>
+  <section class="card">
+    <div class="headrow"><h1>Eintrag #${e.id}</h1>
+      <div class="actions"><button class="btn" onclick="window.print()">Drucken</button><button class="btn danger" id="del">Löschen</button></div>
+    </div>${detailHtml(e)}
+  </section>`;
+  $('#del').onclick = () => {
+    if (!confirm(`Eintrag #${e.id} endgültig löschen? Einträge sind mindestens 5 Jahre aufzubewahren.`)) return;
+    commit((d) => { d.entries = d.entries.filter((x) => x.id !== e.id); });
+    flash(`Eintrag #${e.id} gelöscht.`); go('#/admin');
+  };
+}
+
+function viewPrint() {
+  const list = filteredEntries();
+  app.className = 'wide';
+  app.innerHTML = `
+  <p class="noprint"><a href="#/admin">← Zurück</a> <button class="btn" onclick="window.print()">Drucken</button></p>
+  <header class="printhead"><h1>Verbandsbuch${db.org ? ' – ' + esc(db.org) : ''}</h1>
+  <p>Ausdruck vom ${esc(fmt(nowLocal()))} · ${list.length} Eintr${list.length === 1 ? 'ag' : 'äge'} · Vertraulich – personenbezogene Daten</p></header>
+  ${list.map((e) => `<article class="printentry"><h2>Eintrag #${e.id}</h2>${detailHtml(e)}</article>`).join('')}`;
+}
+
+function exportCsv(list) {
+  const cols = [['id', 'Nr.'], ['incident_at', 'Unfall Datum/Uhrzeit'], ['incident_place', 'Ort'], ['injured_name', 'Verletzte Person'],
+    ['injured_department', 'Abteilung'], ['incident_course', 'Hergang'], ['injury_type', 'Art/Umfang der Verletzung'], ['witnesses', 'Zeugen'],
+    ['aid_at', 'Erste Hilfe Datum/Uhrzeit'], ['aid_measures', 'Maßnahmen'], ['aider_name', 'Erste-Hilfe-Leistende/r'],
+    ['doctor_visit', 'Arztbesuch'], ['work_stopped', 'Arbeit unterbrochen'], ['location_name', 'Standort'], ['created_at', 'Erfasst am']];
+  const cell = (v) => { let s = String(v ?? ''); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return `"${s.replace(/"/g, '""')}"`; };
+  const lines = [cols.map(([, h]) => cell(h)).join(';')].concat(list.map((e) =>
+    cols.map(([k]) => cell(typeof e[k] === 'boolean' ? (e[k] ? 'ja' : 'nein') : e[k])).join(';')));
+  download(`verbandsbuch-${nowLocal().slice(0, 10)}.csv`, '﻿' + lines.join('\r\n'), 'text/csv;charset=utf-8');
+}
+
+function qrSvg(text) {
+  let svg = '';
+  window.QRCode.toString(text, { type: 'svg', errorCorrectionLevel: 'M', margin: 2 }, (err, s) => { svg = err ? '' : s; });
+  return svg;
+}
+const formUrl = (l) => `${appUrl()}#/e/${l.code}`;
+
+function viewLocations() {
+  app.className = 'wide';
+  app.innerHTML = `
+  ${takeFlash()}
+  <h1>Standorte &amp; Zugangscodes</h1>
+  <p class="muted">Jeder Verbandkasten bzw. Standort erhält einen eigenen Zugangscode. Drucken Sie den Aushang aus und bringen Sie ihn am Verbandkasten an.</p>
+  ${isHosted() ? '' : `<div class="note"><strong>Hinweis:</strong> Diese Datei läuft gerade direkt von der Festplatte. Einträge werden nur
+  <em>auf diesem Gerät</em> gespeichert, deshalb enthält der Aushang hier keinen QR-Code, sondern nur den Zugangscode zum Eintippen an diesem Gerät.
+  Liegt die Datei auf einem Webserver, erscheinen hier automatisch QR-Codes.</div>`}
+  <form id="newloc" class="card inline">
+    <input name="name" placeholder="z. B. Werkstatt Halle 2 – Verbandkasten links" maxlength="120" required>
+    <button class="btn primary">Standort anlegen</button>
+  </form>
+  <div class="locs">${db.locations.map((l) => `
+    <div class="loc card${l.active ? '' : ' inactive'}">
+      ${isHosted() ? `<div class="qr" style="width:140px;height:140px">${qrSvg(formUrl(l))}</div>` : ''}
+      <div class="locinfo">
+        <form class="rename" data-id="${l.id}"><input name="name" value="${esc(l.name)}" maxlength="120" required aria-label="Name"><button class="btn small">Speichern</button></form>
+        <p>Code: <code class="bigcode">${esc(l.code)}</code> ${l.active ? '<span class="tag ok">aktiv</span>' : '<span class="tag">deaktiviert</span>'}</p>
+        <div class="actions">
+          <a class="btn small primary" href="#/admin/aushang/${l.id}">Aushang drucken</a>
+          <button class="btn small" data-act="code" data-id="${l.id}">Neuer Code</button>
+          <button class="btn small" data-act="toggle" data-id="${l.id}">${l.active ? 'Deaktivieren' : 'Aktivieren'}</button>
+        </div>
+      </div>
+    </div>`).join('') || '<p class="muted">Noch keine Standorte vorhanden.</p>'}</div>`;
+  app.querySelectorAll('.qr svg').forEach((s) => { s.setAttribute('width', '140'); s.setAttribute('height', '140'); });
+  $('#newloc').onsubmit = (e) => {
+    e.preventDefault(); const name = e.target.elements.name.value.trim(); if (!name) return;
+    let code; commit((d) => { code = genCode(); d.locations.push({ id: d.nextLoc++, name, code, active: true }); });
+    flash(`Standort „${name}“ angelegt (Code ${code}).`); render();
+  };
+  app.querySelectorAll('form.rename').forEach((f) => f.onsubmit = (e) => {
+    e.preventDefault(); const name = f.elements.name.value.trim(); if (!name) return;
+    commit((d) => { d.locations.find((l) => l.id === Number(f.dataset.id)).name = name; }); flash('Name gespeichert.'); render();
+  });
+  app.querySelectorAll('button[data-act]').forEach((b) => b.onclick = () => {
+    const id = Number(b.dataset.id);
+    if (b.dataset.act === 'code') {
+      if (!confirm('Neuen Code erzeugen? Der alte Code funktioniert danach nicht mehr.')) return;
+      commit((d) => { d.locations.find((l) => l.id === id).code = genCode(); }); flash('Neuer Code erzeugt – bitte Aushang neu drucken.');
+    } else {
+      commit((d) => { const l = d.locations.find((x) => x.id === id); l.active = !l.active; });
+    }
+    render();
+  });
+}
+
+function viewPoster(id) {
+  const l = db.locations.find((x) => x.id === Number(id));
+  if (!l) return go('#/admin/standorte');
+  app.className = 'wide';
+  const hosted = isHosted();
+  app.innerHTML = `
+  <p class="noprint"><a href="#/admin/standorte">← Zurück</a> <button class="btn" onclick="window.print()">Drucken</button></p>
+  <div class="sheet">
+    <div class="posterhead"><svg class="cross" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="4" fill="currentColor"/><path d="M10 6h4v4h4v4h-4v4h-4v-4H6v-4h4z" fill="#fff"/></svg>
+      <div><h1>Verbandsbuch</h1>${db.org ? `<p>${esc(db.org)}</p>` : ''}</div></div>
+    <p class="lead">Erste Hilfe geleistet? Bitte <strong>jede</strong> Erste-Hilfe-Leistung dokumentieren – auch kleine Verletzungen.</p>
+    ${hosted ? `<div class="qrbig">${qrSvg(formUrl(l))}</div>
+      <ol class="steps"><li>QR-Code mit dem Smartphone scannen</li><li>Formular ausfüllen</li><li>Absenden – fertig</li></ol>
+      <p class="alt">Ohne QR-Scanner: <strong>${esc(appUrl())}</strong> öffnen und Code eingeben:</p>`
+    : `<ol class="steps"><li>Verbandsbuch am Gerät öffnen</li><li>Diesen Code eingeben</li><li>Formular ausfüllen und speichern</li></ol>
+      <p class="alt">Zugangscode:</p>`}
+    <p class="postercode">${esc(l.code)}</p>
+    <p class="foot">Standort: ${esc(l.name)}</p>
+  </div>`;
+}
+
+function viewSettings() {
+  app.className = 'wide';
+  const cutoff = new Date(); cutoff.setFullYear(cutoff.getFullYear() - 5);
+  const cutoffIso = cutoff.toISOString().slice(0, 10) + 'T00:00';
+  const old = db.entries.filter((e) => e.incident_at < cutoffIso).length;
+  app.innerHTML = `
+  ${takeFlash()}
+  <h1>Einstellungen &amp; Sicherung</h1>
+  <section class="card">
+    <h2>Datensicherung</h2>
+    <p class="muted">Alle Daten liegen <strong>nur in diesem Browser auf diesem Gerät</strong>. Wird der Browserverlauf gelöscht oder
+    das Gerät getauscht, sind sie weg. Erstellen Sie deshalb regelmäßig eine Sicherung und legen Sie sie an einem sicheren Ort ab.</p>
+    <div class="actions">
+      <button class="btn primary" id="backup">Sicherung herunterladen</button>
+      <label class="btn filebtn">Sicherung wiederherstellen<input type="file" id="restore" accept=".json,application/json"></label>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Firmenname</h2>
+    <form id="orgform" class="inline" style="display:flex;gap:.5rem;flex-wrap:wrap">
+      <input name="org" value="${esc(db.org)}" maxlength="80" placeholder="z. B. Musterfirma GmbH" style="flex:1 1 240px;width:auto">
+      <button class="btn">Speichern</button></form>
+  </section>
+  <section class="card">
+    <h2>PIN ändern</h2>
+    <form id="pinform" style="display:flex;gap:.5rem;flex-wrap:wrap">
+      <input name="pin" type="password" placeholder="Neue PIN" autocomplete="new-password" style="flex:1 1 160px;width:auto">
+      <input name="pin2" type="password" placeholder="Wiederholen" autocomplete="new-password" style="flex:1 1 160px;width:auto">
+      <button class="btn">PIN ändern</button></form>
+  </section>
+  <section class="card">
+    <h2>Aufbewahrung</h2>
+    <p class="muted">Aufzeichnungen sind mindestens 5 Jahre aufzubewahren (§ 24 Abs. 6 DGUV Vorschrift 1).
+    ${old} Eintr${old === 1 ? 'ag ist' : 'äge sind'} älter als 5 Jahre.</p>
+    ${old ? '<button class="btn danger" id="purge">Einträge älter als 5 Jahre löschen</button>' : ''}
+  </section>`;
+  $('#backup').onclick = () => {
+    const { pinHash, ...rest } = load();
+    download(`verbandsbuch-sicherung-${nowLocal().slice(0, 10)}.json`, JSON.stringify({ ...rest, exported_at: new Date().toISOString() }, null, 2), 'application/json');
+  };
+  $('#restore').onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!Array.isArray(data.entries) || !Array.isArray(data.locations)) throw new Error('Format');
+      if (!confirm(`Sicherung mit ${data.entries.length} Einträgen und ${data.locations.length} Standorten laden? Die aktuellen Daten auf diesem Gerät werden ersetzt.`)) return;
+      commit((d) => {
+        d.entries = data.entries; d.locations = data.locations; d.org = data.org || d.org;
+        d.nextId = Math.max(d.nextId, ...data.entries.map((x) => x.id + 1), 1);
+        d.nextLoc = Math.max(d.nextLoc, ...data.locations.map((x) => x.id + 1), 1);
+      });
+      flash('Sicherung wiederhergestellt.');
+    } catch (err) { flash('Die Datei ist keine gültige Verbandsbuch-Sicherung.'); }
+    render();
+  };
+  $('#orgform').onsubmit = (e) => { e.preventDefault(); commit((d) => { d.org = e.target.elements.org.value.trim(); }); flash('Firmenname gespeichert.'); render(); };
+  $('#pinform').onsubmit = async (e) => {
+    e.preventDefault(); const f = e.target.elements;
+    if (f.pin.value.length < 4) { flash('Die PIN muss mindestens 4 Zeichen haben.'); return render(); }
+    if (f.pin.value !== f.pin2.value) { flash('Die PINs stimmen nicht überein.'); return render(); }
+    const h = await hashPin(f.pin.value); commit((d) => { d.pinHash = h; }); flash('PIN geändert.'); render();
+  };
+  if (old) $('#purge').onclick = () => {
+    if (!confirm(`${old} Einträge endgültig löschen?`)) return;
+    commit((d) => { d.entries = d.entries.filter((x) => x.incident_at >= cutoffIso); }); flash(`${old} Einträge gelöscht.`); render();
+  };
+}
+
+// ================= Routing =================
+function render() {
+  db = load();
+  $('#orgname').textContent = db.org;
+  document.title = 'Verbandsbuch' + (db.org ? ' – ' + db.org : '');
+  app.className = '';
+  const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  const admin = parts[0] === 'admin';
+  const loggedIn = admin && isAdmin();
+  $('#adminnav').hidden = !loggedIn;
+  $('#footer').hidden = admin;
+  window.scrollTo(0, 0);
+  if (!admin) {
+    if (parts[0] === 'e') {
+      const loc = findLoc(parts[1]);
+      return loc ? viewForm(loc) : viewCode('Dieser Zugangscode ist unbekannt oder wurde deaktiviert.');
+    }
+    if (parts[0] === 'danke') return viewThanks(parts[1], parts[2]);
+    return viewCode();
+  }
+  if (!loggedIn) return viewLogin();
+  switch (parts[1]) {
+    case 'eintrag': return viewEntry(parts[2]);
+    case 'druck': return viewPrint();
+    case 'standorte': return viewLocations();
+    case 'aushang': return viewPoster(parts[2]);
+    case 'einstellungen': return viewSettings();
+    default: return viewEntries();
+  }
+}
+$('#logout').onclick = () => { setAdmin(false); go('#/'); };
+window.addEventListener('hashchange', render);
+window.addEventListener('storage', (e) => { if (e.key === KEY) render(); });
+render();
+</script>
+</body>
+</html>

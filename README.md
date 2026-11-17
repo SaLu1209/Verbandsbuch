@@ -47,6 +47,22 @@ den Aushang drucken.
 - Es handelt sich um Gesundheitsdaten (Art. 9 DSGVO): Zugriff auf die Verwaltung nur für berechtigte Personen,
   Datenschutzbeauftragte/n einbinden.
 
+## Offline-Version (eine einzige Datei, ohne Server)
+
+`offline/verbandsbuch.html` ist eine eigenständige Version, die komplett im Browser läuft – ohne Server,
+ohne Installation und ohne Internet. Datei herunterladen und per Doppelklick öffnen (Chrome, Edge, Firefox, Safari).
+
+- Gleiches Formular, Zugangscodes je Standort, Verwaltung mit PIN, Suche, Druck, CSV-Export, Aushang
+- **Daten liegen nur im Browser des jeweiligen Geräts.** Geeignet z. B. für ein festes Tablet/einen PC an der
+  Erste-Hilfe-Station. Unter *Einstellungen & Sicherung* regelmäßig eine Sicherung (JSON) herunterladen;
+  sie lässt sich auf demselben oder einem anderen Gerät wiederherstellen.
+- Wird die Datei direkt von der Festplatte geöffnet, zeigt der Aushang nur den Zugangscode. Liegt sie auf einem
+  Webserver, enthält der Aushang zusätzlich einen QR-Code – dann speichert aber jedes Handy seine Einträge
+  für sich. Für zentrale Einträge von mehreren Geräten die Server-Version oben verwenden.
+- Die PIN schützt vor neugierigen Blicken, ist aber kein Schutz gegen technisch versierte Personen mit Zugriff auf das Gerät.
+
+Nach Änderungen an `offline/app.src.html` neu bauen: `npm run build:offline`.
+
 ## Tests
 
 ```bash
