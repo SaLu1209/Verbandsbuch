@@ -1,0 +1,27 @@
+{
+  "name": "verbandsbuch",
+  "version": "1.0.0",
+  "description": "Digitales Verbandsbuch mit QR-Code-Zugang",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SaLu1209/Verbandsbuch.git"
+  },
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/SaLu1209/Verbandsbuch/issues"
+  },
+  "homepage": "https://github.com/SaLu1209/Verbandsbuch#readme",
+  "dependencies": {
+    "express": "^4.22.3",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "private": true
+}
